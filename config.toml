@@ -1,0 +1,11 @@
+api_key = "YOUR_API_KEY"
+tickers = ["NVDA", "BRK-A", "SPY"]
+rotation_seconds = 70
+# Cache settings (in seconds)
+cache_max_age = 120           # 2 minutes For weekdays
+weekend_cache_max_age = 7200  # 120 minutes For Saturdays and Sundays
+
+[thresholds]
+critdown = -10.0  # below this, mark as "critdown"
+down = 0.0        # below 0.0 (but not less than critdown) mark as "down"
+wayup = 5.0       # above this, mark as "wayup"
