@@ -9,3 +9,10 @@ weekend_cache_max_age = 7200  # 120 minutes For Saturdays and Sundays
 critdown = -10.0  # below this, mark as "critdown"
 down = 0.0        # below 0.0 (but not less than critdown) mark as "down"
 wayup = 5.0       # above this, mark as "wayup"
+
+# --- Kraken (Crypto) Settings ---
+[kraken]
+trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
+trade_signs = ["", "", "⟠"]
+rotation_seconds = 10         # Rotate crypto pairs every 10 seconds
+chart_interval = 5            # Candle interval in minutes
