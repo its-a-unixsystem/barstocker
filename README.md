@@ -41,11 +41,12 @@ The program uses a TOML configuration file. By default, it looks for a file name
 
 ```toml
 # config.toml
+rotation_seconds = 70
 
 # --- Tiingo (Stock) Settings ---
+[stock]
 api_key = "YOUR_TIINGO_API_KEY"
 tickers = ["NVDA", "BRK-A", "SPY"]
-rotation_seconds = 70
 
 # Cache settings (in seconds) for Tiingo data:
 cache_max_age = 60           # Maximum cache age on weekdays
@@ -62,18 +63,17 @@ critdown = -10.0
 down = 0.0
 wayup = 5.0
 
-# --- Kraken (Crypto) Settings ---
-[kraken]
+# --- Crypto (via Kraken) Settings ---
+[crypto]
 trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
 trade_signs = ["", "", "⟠"]
-rotation_seconds = 10         # Rotate crypto pairs every 10 seconds
 chart_interval = 5            # Candle interval in minutes
 ```
 
 ### Configuration Fields Explained
 
 - **api_key:**  
-  Your Tiingo API key. Replace `"YOUR_TIINGO_API_KEY"` with your actual key.
+  Your Tiingo API key. Replace `"YOUR_TIINGO_API_KEY"` with your actual key, alternatively set the environment variable `TIINGO_API_KEY`.
 
 - **tickers:**  
   A list of stock tickers to monitor. The program rotates through these based on `rotation_seconds`.
@@ -91,7 +91,7 @@ chart_interval = 5            # Candle interval in minutes
   - **wayup:** If the percentage change is greater than this value, it is `"wayup"`.
   - Any change that doesn’t meet the above conditions is classified as `"up"`.
 
-- **[kraken]:**  
+- **[crypto]:**  
   Settings for fetching cryptocurrency data from Kraken:
   - **trade_pairs:** A list of crypto trade pairs to monitor.
   - **trade_signs:** A list of corresponding symbols for display.
@@ -106,14 +106,6 @@ To run the program in stock mode (which is the default), simply execute:
 
 ```bash
 cargo run --release
-```
-
-### Crypto (Kraken) Mode
-
-To run the program in crypto mode, pass the `--crypto` flag:
-
-```bash
-cargo run --release -- --crypto
 ```
 
 If your configuration file is located elsewhere or has a different name, specify its path as the first argument:

@@ -6,93 +6,152 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::process;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Thresholds for classifying the percentage change (for both stocks and crypto).
+/// Global thresholds used for both stocks and crypto.
 #[derive(Debug, Deserialize)]
 struct Thresholds {
-    critdown: f64, // if price change < critdown then mark as "critdown"
-    down: f64,     // if price change < down (but >= critdown) then mark as "down"
-    wayup: f64,    // if price change > wayup then mark as "wayup"
+    critdown: f64, // if percentage change < critdown then "critdown"
+    down: f64,     // if percentage change < down (but >= critdown) then "down"
+    wayup: f64,    // if percentage change > wayup then "wayup"
 }
 
-/// Kraken (crypto) configuration.
+/// Stock (Tiingo) configuration (optional).
 #[derive(Debug, Deserialize)]
-struct KrakenConfig {
+struct StockConfig {
+    api_key: String, // Can be overridden by the TIINGO_API_KEY env variable.
+    tickers: Vec<String>,
+    cache_max_age: u64,         // Cache age for weekdays.
+    weekend_cache_max_age: u64, // Cache age for weekends.
+}
+
+/// Crypto configuration.
+#[derive(Debug, Deserialize)]
+struct CryptoConfig {
     trade_pairs: Vec<String>,
     trade_signs: Vec<String>,
-    rotation_seconds: u64,
     chart_interval: u64,
+    cache_max_age: u64, // Cache age (in seconds) for crypto data.
 }
 
 /// Top-level configuration.
 #[derive(Debug, Deserialize)]
 struct Config {
-    // --- Tiingo (Stock) Settings ---
-    api_key: String,
-    tickers: Vec<String>,
-    rotation_seconds: u64,
-    cache_max_age: u64,
-    weekend_cache_max_age: u64,
+    rotation_seconds: u64, // Global rotation interval for the combined list.
+    stock: Option<StockConfig>,
     thresholds: Thresholds,
-
-    // --- Kraken (Crypto) Settings (Optional) ---
-    kraken: Option<KrakenConfig>,
+    crypto: Option<CryptoConfig>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Determine the configuration file and mode.
-    // The first argument (if not a flag) is the config file; use default "config.toml" otherwise.
+    // Parse command-line arguments.
+    // If an argument (not starting with "--") is provided, it's the config file.
+    // The "--continuous" flag makes the application loop indefinitely.
     let args: Vec<String> = env::args().collect();
-    let config_file = if args.len() > 1 && !args[1].starts_with("--") {
-        &args[1]
-    } else {
-        "config.toml"
-    };
-    // If any argument equals "--crypto", run in crypto mode.
-    let use_crypto = args.iter().any(|arg| arg == "--crypto");
+    let mut config_file = "config.toml".to_string();
+    let mut continuous = false;
+    for arg in args.iter().skip(1) {
+        if arg == "--continuous" {
+            continuous = true;
+        } else if !arg.starts_with("--") {
+            config_file = arg.clone();
+        }
+    }
 
     // Load configuration.
-    let config_contents = fs::read_to_string(config_file).map_err(|err| {
-        eprintln!("Error: Could not read config file '{}': {}", config_file, err);
+    let config_contents = fs::read_to_string(&config_file).map_err(|err| {
+        eprintln!(
+            "Error: Could not read config file '{}': {}",
+            config_file, err
+        );
         err
     })?;
     let config: Config = toml::from_str(&config_contents).map_err(|err| {
-        eprintln!("Error: Could not parse config file '{}': {}", config_file, err);
+        eprintln!(
+            "Error: Could not parse config file '{}': {}",
+            config_file, err
+        );
         err
     })?;
 
-    if use_crypto {
-        if config.kraken.is_none() {
-            eprintln!("Error: Kraken configuration not found in config file.");
-            process::exit(1);
+    if continuous {
+        loop {
+            output_current_instrument(&config)?;
+            thread::sleep(Duration::from_secs(config.rotation_seconds));
         }
-        run_kraken(&config)?;
     } else {
-        run_tiingo(&config)?;
+        output_current_instrument(&config)?;
     }
-
     Ok(())
 }
 
-/// Runs the Tiingo (stock) branch.
-fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    // Compute the ticker to use based on time-based rotation.
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let ticker_index = ((now / config.rotation_seconds) % config.tickers.len() as u64) as usize;
-    let selected_ticker = &config.tickers[ticker_index];
+/// Combines available stock and crypto instruments, rotates through them,
+/// fetches data for the current instrument, and prints the JSON output on one line.
+/// If neither are defined, the program exits with an error.
+fn output_current_instrument(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let mut instruments: Vec<(&str, &str, &str)> = Vec::new();
 
-    // Determine effective cache max age based on day of the week.
-    let local_now = Local::now();
-    let today = local_now.weekday();
-    let effective_cache_max_age = if today == Weekday::Sat || today == Weekday::Sun {
-        config.weekend_cache_max_age
+    // Add stock instruments if defined and if tickers are provided.
+    if let Some(stock) = &config.stock {
+        if !stock.tickers.is_empty() {
+            for ticker in &stock.tickers {
+                instruments.push(("stock", ticker, ""));
+            }
+        }
+    }
+
+    // Add crypto instruments if defined and if trade pairs are provided.
+    if let Some(crypto) = &config.crypto {
+        if !crypto.trade_pairs.is_empty() {
+            for (i, pair) in crypto.trade_pairs.iter().enumerate() {
+                let sign = crypto.trade_signs.get(i).map(|s| s.as_str()).unwrap_or("");
+                instruments.push(("crypto", pair, sign));
+            }
+        }
+    }
+
+    if instruments.is_empty() {
+        eprintln!("Error: No instruments defined in the configuration.");
+        process::exit(1);
+    }
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let index = (now / config.rotation_seconds) % (instruments.len() as u64);
+    let (inst_type, symbol, sign) = instruments[index as usize];
+
+    let output = if inst_type == "stock" {
+        run_tiingo_for_ticker(symbol, config)?
     } else {
-        config.cache_max_age
+        run_crypto_for_pair(symbol, sign, config)?
     };
 
-    // Check cache (stored in a file named "cache_<ticker>.json").
-    let cache_file = format!("cache_{}.json", selected_ticker);
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+/// Fetches stock data from Tiingo for a given ticker, using caching.
+/// The environment variable `TIINGO_API_KEY` (if set) overrides the API key in the config.
+fn run_tiingo_for_ticker(
+    ticker: &str,
+    config: &Config,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    // It is safe to unwrap because this function is only called if a stock instrument is selected.
+    let stock_config = config.stock.as_ref().expect("Stock configuration missing");
+    let api_key = match env::var("TIINGO_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => stock_config.api_key.clone(),
+    };
+
+    let local_now = Local::now();
+    let effective_cache_max_age =
+        if local_now.weekday() == Weekday::Sat || local_now.weekday() == Weekday::Sun {
+            stock_config.weekend_cache_max_age
+        } else {
+            stock_config.cache_max_age
+        };
+
+    let cache_file = format!("cache_{}.json", ticker);
     let use_cache = if let Ok(metadata) = fs::metadata(&cache_file) {
         if let Ok(modified) = metadata.modified() {
             let elapsed = SystemTime::now()
@@ -106,7 +165,7 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         false
     };
 
-    let tiingo_url = format!("https://api.tiingo.com/iex/{}", selected_ticker);
+    let tiingo_url = format!("https://api.tiingo.com/iex/{}", ticker);
     let client = Client::new();
     let response_text = if use_cache {
         fs::read_to_string(&cache_file)?
@@ -114,7 +173,7 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let response = client
             .get(&tiingo_url)
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Token {}", config.api_key))
+            .header(AUTHORIZATION, format!("Token {}", api_key))
             .send()?;
         if !response.status().is_success() {
             eprintln!("Error: Failed to fetch data from: {}", tiingo_url);
@@ -125,7 +184,6 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         text
     };
 
-    // Calculate the cache age.
     let cache_age = {
         let metadata = fs::metadata(&cache_file)?;
         let modified = metadata.modified()?;
@@ -135,9 +193,8 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             .as_secs()
     };
 
-    // Parse the JSON response.
-    let json: Value = serde_json::from_str(&response_text)?;
-    let first_entry = json
+    let json_data: Value = serde_json::from_str(&response_text)?;
+    let first_entry = json_data
         .get(0)
         .ok_or("Invalid API response: missing array element")?;
     let last_price = first_entry
@@ -151,13 +208,12 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     if prev_close == 0.0 {
         eprintln!(
             "Error: Previous close is zero for ticker: {} (cannot calculate % change).",
-            selected_ticker
+            ticker
         );
         process::exit(1);
     }
     let price_change_pct = ((last_price - prev_close) / prev_close) * 100.0;
 
-    // Determine output class using the global thresholds.
     let class = if price_change_pct < config.thresholds.down {
         if price_change_pct < config.thresholds.critdown {
             "critdown"
@@ -170,93 +226,118 @@ fn run_tiingo(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         "up"
     };
 
-    // Build the JSON output (single line, no line breaks).
-    let output = json!({
-        "text": format!("{} ${:.2} ({:.2}%)", selected_ticker, last_price, price_change_pct),
-        "tooltip": format!("Cache Age: {}/{} seconds", cache_age, effective_cache_max_age),
+    Ok(json!({
+        "text": format!("{} ${:.2} ({:.2}%)", ticker, last_price, price_change_pct),
+        "tooltip": format!("Cache Age: {} seconds (Max allowed: {} seconds)", cache_age, effective_cache_max_age),
         "class": class,
-    });
-
-    println!("{}", serde_json::to_string(&output)?);
-    Ok(())
+    }))
 }
 
-/// Runs the Kraken (crypto) branch.
-fn run_kraken(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let kraken = config.kraken.as_ref().unwrap();
-
-    // Determine which trade pair/sign to use based on time-based rotation.
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let pair_index = ((now / kraken.rotation_seconds) % kraken.trade_pairs.len() as u64) as usize;
-    let selected_pair = &kraken.trade_pairs[pair_index];
-    let selected_sign = &kraken.trade_signs[pair_index];
-
-    // Calculate "yesterday" as 24 hours ago.
-    let yesterday_timestamp = now - 86_400;
-
-    // Kraken public API endpoints.
-    let kraken_api = "https://api.kraken.com/0/public";
-    let ohlc_url = format!(
-        "{}/OHLC?pair={}&interval={}",
-        kraken_api, selected_pair, kraken.chart_interval
-    );
-    let ticker_url = format!("{}/Ticker?pair={}", kraken_api, selected_pair);
-
-    let client = Client::new();
-
-    // Fetch OHLC data.
-    let ohlc_response = client
-        .get(&ohlc_url)
-        .header("Accept", "application/json")
-        .send()?;
-    if !ohlc_response.status().is_success() {
-        eprintln!("Error: Failed to fetch OHLC data from: {}", ohlc_url);
-        process::exit(1);
-    }
-    let ohlc_text = ohlc_response.text()?;
-    let ohlc_json: Value = serde_json::from_str(&ohlc_text)?;
-
-    // Fetch Ticker data.
-    let ticker_response = client
-        .get(&ticker_url)
-        .header("Accept", "application/json")
-        .send()?;
-    if !ticker_response.status().is_success() {
-        eprintln!("Error: Failed to fetch Ticker data from: {}", ticker_url);
-        process::exit(1);
-    }
-    let ticker_text = ticker_response.text()?;
-    let ticker_json: Value = serde_json::from_str(&ticker_text)?;
-
-    // Extract current price from the ticker JSON.
-    // Path: .result[selected_pair].p[0]
-    let current_value = ticker_json
-        .get("result")
-        .and_then(|r| r.get(selected_pair))
-        .and_then(|pair| pair.get("p"))
-        .and_then(|p| p.get(0))
-        .and_then(|val| val.as_str())
-        .and_then(|s| s.parse::<f64>().ok());
-    let current_value = match current_value {
-        Some(val) => val,
-        None => {
-            eprintln!("Error: Could not retrieve current price for {}.", selected_pair);
+/// Fetches crypto data from Kraken (renamed to Crypto) for a given trade pair,
+/// using caching for both OHLC and ticker endpoints.
+fn run_crypto_for_pair(
+    pair: &str,
+    sign: &str,
+    config: &Config,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let crypto = match &config.crypto {
+        Some(c) if !c.trade_pairs.is_empty() => c,
+        _ => {
+            eprintln!("Error: No crypto configuration available.");
             process::exit(1);
         }
     };
 
-    // Retrieve the OHLC candles array for the selected pair.
+    let cache_max_age = crypto.cache_max_age;
+    let cache_file_ohlc = format!("cache_crypto_{}_ohlc.json", pair);
+    let cache_file_ticker = format!("cache_crypto_{}_ticker.json", pair);
+
+    let use_cache_ohlc = if let Ok(metadata) = fs::metadata(&cache_file_ohlc) {
+        if let Ok(modified) = metadata.modified() {
+            let elapsed = SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or(Duration::from_secs(u64::MAX));
+            elapsed < Duration::from_secs(cache_max_age)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let use_cache_ticker = if let Ok(metadata) = fs::metadata(&cache_file_ticker) {
+        if let Ok(modified) = metadata.modified() {
+            let elapsed = SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or(Duration::from_secs(u64::MAX));
+            elapsed < Duration::from_secs(cache_max_age)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let kraken_api = "https://api.kraken.com/0/public";
+    let ohlc_url = format!(
+        "{}/OHLC?pair={}&interval={}",
+        kraken_api, pair, crypto.chart_interval
+    );
+    let ticker_url = format!("{}/Ticker?pair={}", kraken_api, pair);
+    let client = Client::new();
+
+    let ohlc_text = if use_cache_ohlc {
+        fs::read_to_string(&cache_file_ohlc)?
+    } else {
+        let response = client
+            .get(&ohlc_url)
+            .header("Accept", "application/json")
+            .send()?;
+        if !response.status().is_success() {
+            eprintln!("Error: Failed to fetch OHLC data from: {}", ohlc_url);
+            process::exit(1);
+        }
+        let text = response.text()?;
+        fs::write(&cache_file_ohlc, &text)?;
+        text
+    };
+
+    let ticker_text = if use_cache_ticker {
+        fs::read_to_string(&cache_file_ticker)?
+    } else {
+        let response = client
+            .get(&ticker_url)
+            .header("Accept", "application/json")
+            .send()?;
+        if !response.status().is_success() {
+            eprintln!("Error: Failed to fetch Ticker data from: {}", ticker_url);
+            process::exit(1);
+        }
+        let text = response.text()?;
+        fs::write(&cache_file_ticker, &text)?;
+        text
+    };
+
+    let ticker_json: Value = serde_json::from_str(&ticker_text)?;
+    let current_value = ticker_json
+        .get("result")
+        .and_then(|r| r.get(pair))
+        .and_then(|pair| pair.get("p"))
+        .and_then(|p| p.get(0))
+        .and_then(|val| val.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .ok_or("Error: Could not retrieve current price for crypto")?;
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let yesterday_timestamp = now - 86_400;
+    let ohlc_json: Value = serde_json::from_str(&ohlc_text)?;
     let candles = ohlc_json
         .get("result")
-        .and_then(|r| r.get(selected_pair))
+        .and_then(|r| r.get(pair))
         .and_then(|v| v.as_array())
         .ok_or("Error: Could not retrieve OHLC candles array")?;
-
-    // Find the last candle from or before "yesterday."
     let mut old_vwap: Option<f64> = None;
     for candle in candles {
-        // Each candle is expected to be an array:
-        // [time, open, high, low, close, vwap, volume, count]
         if let Some(ts) = candle.get(0).and_then(|v| v.as_i64()) {
             if ts <= yesterday_timestamp as i64 {
                 if let Some(close) = candle
@@ -269,10 +350,7 @@ fn run_kraken(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    // Default to current_value if no valid candle is found.
     let old_vwap = old_vwap.unwrap_or(current_value);
-
-    // Calculate the percentage change.
     let change_percentage_opt = if old_vwap == 0.0 {
         None
     } else {
@@ -282,8 +360,6 @@ fn run_kraken(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         Some(val) => format!("{:.2}", val),
         None => "NA".to_string(),
     };
-
-    // Use the global thresholds for classification.
     let status_class = if let Some(change) = change_percentage_opt {
         if change < config.thresholds.down {
             if change < config.thresholds.critdown {
@@ -299,16 +375,10 @@ fn run_kraken(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "up"
     };
-
     let current_value_str = format!("{:.2}", current_value);
-
-    // Build the JSON output (single line, no line breaks).
-    let output = json!({
-        "text": format!("{} €{} ({}%)", selected_sign, current_value_str, change_percentage_str),
+    Ok(json!({
+        "text": format!("{} €{} ({}%)", sign, current_value_str, change_percentage_str),
         "tooltip": format!("€{} ({}%)", current_value_str, change_percentage_str),
         "class": status_class,
-    });
-    println!("{}", serde_json::to_string(&output)?);
-
-    Ok(())
+    }))
 }
