@@ -24,7 +24,7 @@ The output is a single-line JSON object with the following keys:
 
    ```bash
    git clone https://github.com/its-a-unixsystem/barstocker.git
-   cd stock-crypto-status-widget
+   cd barstocker
    ```
 
 2. **Build the Project:**
