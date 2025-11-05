@@ -21,7 +21,6 @@ struct Thresholds {
 /// Stock (Tiingo) configuration (optional).
 #[derive(Debug, Deserialize)]
 struct StockConfig {
-    api_key: String,            // Can be overridden by the TIINGO_API_KEY env variable.
     tickers: Vec<String>,
     cache_max_age: u64,         // Cache age for weekdays.
     weekend_cache_max_age: u64, // Cache age for weekends.
@@ -46,6 +45,10 @@ struct Config {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load environment variables from .env.local (if it exists)
+    // This allows loading API keys without hardcoding them
+    let _ = dotenvy::from_filename(".env.local");
+    
     // Parse command-line arguments.
     // If an argument (not starting with "--") is provided, it's the config file.
     // The "--continuous" flag makes the application loop indefinitely.
