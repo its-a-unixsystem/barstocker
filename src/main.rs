@@ -5,9 +5,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::process;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Global thresholds used for both stocks and crypto.
 #[derive(Debug, Deserialize)]
@@ -106,8 +107,7 @@ fn output_current_instrument(config: &Config) -> Result<(), Box<dyn std::error::
     }
 
     if instruments.is_empty() {
-        eprintln!("Error: No instruments defined in the configuration.");
-        process::exit(1);
+        return Err("No instruments defined in the configuration".into());
     }
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -124,15 +124,49 @@ fn output_current_instrument(config: &Config) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Checks if a cache file is still valid based on its age.
+fn is_cache_valid(cache_file: &str, max_age_secs: u64) -> bool {
+    fs::metadata(cache_file)
+        .and_then(|m| m.modified())
+        .map(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or(Duration::from_secs(u64::MAX))
+                < Duration::from_secs(max_age_secs)
+        })
+        .unwrap_or(false)
+}
+
+/// Calculates percentage change between two values.
+/// Returns None if the base value is zero to avoid division by zero.
+fn calculate_percentage_change(current: f64, base: f64) -> Option<f64> {
+    if base == 0.0 {
+        None
+    } else {
+        Some(((current - base) / base) * 100.0)
+    }
+}
+
+/// Atomically writes content to a file using a temporary file and rename.
+fn atomic_write(file_path: &str, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let temp_file = format!("{}.tmp", file_path);
+    fs::write(&temp_file, content)?;
+    fs::rename(&temp_file, file_path)?;
+    Ok(())
+}
+
 /// Fetches stock data from Tiingo for a given ticker, using caching.
-/// The environment variable `TIINGO_API_KEY` (if set) overrides the API key in the config.
+/// The environment variable `TIINGO_API_KEY` is required.
 fn run_tiingo_for_ticker(ticker: &str, config: &Config) -> Result<Value, Box<dyn std::error::Error>> {
-    // It is safe to unwrap because this function is only called if a stock instrument is selected.
-    let stock_config = config.stock.as_ref().expect("Stock configuration missing");
-    let api_key = match env::var("TIINGO_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => key,
-        _ => stock_config.api_key.clone(),
-    };
+    let stock_config = config.stock.as_ref()
+        .ok_or("Stock configuration missing")?;
+    
+    let api_key = env::var("TIINGO_API_KEY")
+        .map_err(|_| "TIINGO_API_KEY environment variable not set. Please set it with your Tiingo API key.")?;
+
+    if api_key.trim().is_empty() {
+        return Err("TIINGO_API_KEY environment variable is empty".into());
+    }
 
     let local_now = Local::now();
     let effective_cache_max_age = if local_now.weekday() == Weekday::Sat || local_now.weekday() == Weekday::Sun {
@@ -142,17 +176,7 @@ fn run_tiingo_for_ticker(ticker: &str, config: &Config) -> Result<Value, Box<dyn
     };
 
     let cache_file = format!("cache_{}.json", ticker);
-    let use_cache = if let Ok(metadata) = fs::metadata(&cache_file) {
-        if let Ok(modified) = metadata.modified() {
-            let elapsed = SystemTime::now().duration_since(modified)
-                .unwrap_or(Duration::from_secs(u64::MAX));
-            elapsed < Duration::from_secs(effective_cache_max_age)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let use_cache = is_cache_valid(&cache_file, effective_cache_max_age);
 
     let tiingo_url = format!("https://api.tiingo.com/iex/{}", ticker);
     let client = Client::new();
@@ -163,12 +187,16 @@ fn run_tiingo_for_ticker(ticker: &str, config: &Config) -> Result<Value, Box<dyn
             .header(CONTENT_TYPE, "application/json")
             .header(AUTHORIZATION, format!("Token {}", api_key))
             .send()?;
+        
         if !response.status().is_success() {
-            eprintln!("Error: Failed to fetch data from: {}", tiingo_url);
-            process::exit(1);
+            return Err(format!(
+                "Failed to fetch data from Tiingo for ticker {}: HTTP status {}",
+                ticker, response.status()
+            ).into());
         }
+        
         let text = response.text()?;
-        fs::write(&cache_file, &text)?;
+        atomic_write(&cache_file, &text)?;
         text
     };
 
@@ -181,14 +209,19 @@ fn run_tiingo_for_ticker(ticker: &str, config: &Config) -> Result<Value, Box<dyn
     };
 
     let json_data: Value = serde_json::from_str(&response_text)?;
-    let first_entry = json_data.get(0).ok_or("Invalid API response: missing array element")?;
-    let last_price = first_entry.get("tngoLast").and_then(|v| v.as_f64()).ok_or("Invalid tngoLast field")?;
-    let prev_close = first_entry.get("prevClose").and_then(|v| v.as_f64()).ok_or("Invalid prevClose field")?;
-    if prev_close == 0.0 {
-        eprintln!("Error: Previous close is zero for ticker: {} (cannot calculate % change).", ticker);
-        process::exit(1);
-    }
-    let price_change_pct = ((last_price - prev_close) / prev_close) * 100.0;
+    let first_entry = json_data.get(0)
+        .ok_or_else(|| format!("Invalid API response for ticker {}: missing array element", ticker))?;
+    
+    let last_price = first_entry.get("tngoLast")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("Invalid tngoLast field for ticker {}: {:?}", ticker, first_entry))?;
+    
+    let prev_close = first_entry.get("prevClose")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("Invalid prevClose field for ticker {}: {:?}", ticker, first_entry))?;
+    
+    let price_change_pct = calculate_percentage_change(last_price, prev_close)
+        .ok_or_else(|| format!("Previous close is zero for ticker {}, cannot calculate percentage change", ticker))?;
 
     let class = if price_change_pct < config.thresholds.down {
         if price_change_pct < config.thresholds.critdown {
@@ -209,36 +242,22 @@ fn run_tiingo_for_ticker(ticker: &str, config: &Config) -> Result<Value, Box<dyn
     }))
 }
 
-/// Fetches crypto data from Kraken (renamed to Crypto) for a given trade pair,
+/// Fetches crypto data from Kraken for a given trade pair,
 /// using caching for both OHLC and ticker endpoints.
 fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value, Box<dyn std::error::Error>> {
-    let crypto = match &config.crypto {
-        Some(c) if !c.trade_pairs.is_empty() => c,
-        _ => {
-            eprintln!("Error: No crypto configuration available.");
-            process::exit(1);
-        }
-    };
+    let crypto = config.crypto.as_ref()
+        .ok_or("Crypto configuration missing")?;
+
+    if crypto.trade_pairs.is_empty() {
+        return Err("No crypto trade pairs configured".into());
+    }
 
     let cache_max_age = crypto.cache_max_age;
     let cache_file_ohlc = format!("cache_crypto_{}_ohlc.json", pair);
     let cache_file_ticker = format!("cache_crypto_{}_ticker.json", pair);
 
-    let use_cache_ohlc = if let Ok(metadata) = fs::metadata(&cache_file_ohlc) {
-        if let Ok(modified) = metadata.modified() {
-            let elapsed = SystemTime::now().duration_since(modified)
-                .unwrap_or(Duration::from_secs(u64::MAX));
-            elapsed < Duration::from_secs(cache_max_age)
-        } else { false }
-    } else { false };
-
-    let use_cache_ticker = if let Ok(metadata) = fs::metadata(&cache_file_ticker) {
-        if let Ok(modified) = metadata.modified() {
-            let elapsed = SystemTime::now().duration_since(modified)
-                .unwrap_or(Duration::from_secs(u64::MAX));
-            elapsed < Duration::from_secs(cache_max_age)
-        } else { false }
-    } else { false };
+    let use_cache_ohlc = is_cache_valid(&cache_file_ohlc, cache_max_age);
+    let use_cache_ticker = is_cache_valid(&cache_file_ticker, cache_max_age);
 
     let kraken_api = "https://api.kraken.com/0/public";
     let ohlc_url = format!("{}/OHLC?pair={}&interval={}", kraken_api, pair, crypto.chart_interval);
@@ -251,12 +270,16 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
         let response = client.get(&ohlc_url)
             .header("Accept", "application/json")
             .send()?;
+        
         if !response.status().is_success() {
-            eprintln!("Error: Failed to fetch OHLC data from: {}", ohlc_url);
-            process::exit(1);
+            return Err(format!(
+                "Failed to fetch OHLC data from Kraken for pair {}: HTTP status {}",
+                pair, response.status()
+            ).into());
         }
+        
         let text = response.text()?;
-        fs::write(&cache_file_ohlc, &text)?;
+        atomic_write(&cache_file_ohlc, &text)?;
         text
     };
 
@@ -266,31 +289,37 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
         let response = client.get(&ticker_url)
             .header("Accept", "application/json")
             .send()?;
+        
         if !response.status().is_success() {
-            eprintln!("Error: Failed to fetch Ticker data from: {}", ticker_url);
-            process::exit(1);
+            return Err(format!(
+                "Failed to fetch Ticker data from Kraken for pair {}: HTTP status {}",
+                pair, response.status()
+            ).into());
         }
+        
         let text = response.text()?;
-        fs::write(&cache_file_ticker, &text)?;
+        atomic_write(&cache_file_ticker, &text)?;
         text
     };
 
     let ticker_json: Value = serde_json::from_str(&ticker_text)?;
     let current_value = ticker_json.get("result")
         .and_then(|r| r.get(pair))
-        .and_then(|pair| pair.get("p"))
+        .and_then(|pair_data| pair_data.get("p"))
         .and_then(|p| p.get(0))
         .and_then(|val| val.as_str())
         .and_then(|s| s.parse::<f64>().ok())
-        .ok_or("Error: Could not retrieve current price for crypto")?;
+        .ok_or_else(|| format!("Could not retrieve current price for crypto pair {}", pair))?;
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let yesterday_timestamp = now - 86_400;
+    let yesterday_timestamp = now - SECONDS_PER_DAY;
+    
     let ohlc_json: Value = serde_json::from_str(&ohlc_text)?;
     let candles = ohlc_json.get("result")
         .and_then(|r| r.get(pair))
         .and_then(|v| v.as_array())
-        .ok_or("Error: Could not retrieve OHLC candles array")?;
+        .ok_or_else(|| format!("Could not retrieve OHLC candles array for pair {}", pair))?;
+    
     let mut old_vwap: Option<f64> = None;
     for candle in candles {
         if let Some(ts) = candle.get(0).and_then(|v| v.as_i64()) {
@@ -303,16 +332,15 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
             }
         }
     }
+    
     let old_vwap = old_vwap.unwrap_or(current_value);
-    let change_percentage_opt = if old_vwap == 0.0 {
-        None
-    } else {
-        Some(((current_value - old_vwap) / old_vwap) * 100.0)
-    };
+    let change_percentage_opt = calculate_percentage_change(current_value, old_vwap);
+    
     let change_percentage_str = match change_percentage_opt {
         Some(val) => format!("{:.2}", val),
         None => "NA".to_string(),
     };
+    
     let status_class = if let Some(change) = change_percentage_opt {
         if change < config.thresholds.down {
             if change < config.thresholds.critdown {
@@ -328,6 +356,7 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
     } else {
         "up"
     };
+    
     let current_value_str = format!("{:.2}", current_value);
     Ok(json!({
         "text": format!("{} €{} ({}%)", sign, current_value_str, change_percentage_str),
