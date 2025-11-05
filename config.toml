@@ -1,7 +1,8 @@
 rotation_seconds = 2
+width = 30
+oneline_separator = " - "
 
 [stock]
-api_key = "YOUR_API_KEY"
 tickers = ["NVDA", "BRK-A", "SPY"]
 # Cache settings (in seconds)
 cache_max_age = 120           # 2 minutes For weekdays
@@ -11,6 +12,10 @@ weekend_cache_max_age = 7200  # 120 minutes For Saturdays and Sundays
 critdown = -10.0  # below this, mark as "critdown"
 down = 0.0        # below 0.0 (but not less than critdown) mark as "down"
 wayup = 5.0       # above this, mark as "wayup"
+up_color = "#00FF00"      # Color for "up"
+wayup_color = "#008000"   # Color for "wayup"
+down_color = "#FF0000"    # Color for "down"
+waydown_color = "#800000" # Color for "waydown"
 
 # --- Kraken (Crypto) Settings ---
 [crypto]
