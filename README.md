@@ -45,7 +45,8 @@ rotation_seconds = 70
 
 # --- Tiingo (Stock) Settings ---
 [stock]
-api_key = "YOUR_TIINGO_API_KEY"
+# Note: API key must be set via TIINGO_API_KEY environment variable
+# Example: export TIINGO_API_KEY="your_api_key_here"
 tickers = ["NVDA", "BRK-A", "SPY"]
 
 # Cache settings (in seconds) for Tiingo data:
@@ -72,8 +73,14 @@ chart_interval = 5            # Candle interval in minutes
 
 ### Configuration Fields Explained
 
-- **api_key:**  
-  Your Tiingo API key. Replace `"YOUR_TIINGO_API_KEY"` with your actual key, alternatively set the environment variable `TIINGO_API_KEY`.
+- **TIINGO_API_KEY (Environment Variable):**  
+  Your Tiingo API key. **Required** for stock functionality. Two options:
+  
+  1. **Recommended**: Create a `.env.local` file (see `.env.example`)
+  2. **Alternative**: Set environment variable directly:
+     ```bash
+     export TIINGO_API_KEY="your_actual_api_key_here"
+     ```
 
 - **tickers:**  
   A list of stock tickers to monitor. The program rotates through these based on `rotation_seconds`.
@@ -99,6 +106,32 @@ chart_interval = 5            # Candle interval in minutes
   - **chart_interval:** The candle interval (in minutes) for Kraken OHLC data.
 
 ## Running the Program
+
+### Setup
+
+1. **Copy the example configuration:**
+   ```bash
+   cp config.toml.example config.toml
+   ```
+
+2. **Set your Tiingo API key:**
+   
+   **Option A: Using .env.local file (Recommended):**
+   ```bash
+   cp .env.example .env.local
+   # Edit .env.local and replace 'your_api_key_here' with your actual key
+   nano .env.local  # or use your preferred editor
+   ```
+   
+   **Option B: Using environment variable:**
+   ```bash
+   export TIINGO_API_KEY="your_actual_api_key_here"
+   ```
+   
+   Or add it to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) for persistence:
+   ```bash
+   echo 'export TIINGO_API_KEY="your_actual_api_key_here"' >> ~/.bashrc
+   ```
 
 ### Stock (Tiingo) Mode (Default)
 
@@ -134,6 +167,7 @@ This project uses the following Rust crates:
 - [serde](https://crates.io/crates/serde) and [serde_json](https://crates.io/crates/serde_json) for JSON (de)serialization.
 - [toml](https://crates.io/crates/toml) for parsing the configuration file.
 - [chrono](https://crates.io/crates/chrono) for date and time handling.
+- [dotenvy](https://crates.io/crates/dotenvy) for loading environment variables from `.env.local`.
 
 ## License
 
