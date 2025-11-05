@@ -52,12 +52,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments.
     // If an argument (not starting with "--") is provided, it's the config file.
     // The "--continuous" flag makes the application loop indefinitely.
+    // The "--crypto" flag shows only crypto instruments.
+    // The "--stock" flag shows only stock instruments.
     let args: Vec<String> = env::args().collect();
     let mut config_file = "config.toml".to_string();
     let mut continuous = false;
+    let mut filter_mode: Option<&str> = None;
+    
     for arg in args.iter().skip(1) {
         if arg == "--continuous" {
             continuous = true;
+        } else if arg == "--crypto" {
+            filter_mode = Some("crypto");
+        } else if arg == "--stock" {
+            filter_mode = Some("stock");
         } else if !arg.starts_with("--") {
             config_file = arg.clone();
         }
@@ -75,11 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if continuous {
         loop {
-            output_current_instrument(&config)?;
+            output_current_instrument(&config, filter_mode)?;
             thread::sleep(Duration::from_secs(config.rotation_seconds));
         }
     } else {
-        output_current_instrument(&config)?;
+        output_current_instrument(&config, filter_mode)?;
     }
     Ok(())
 }
@@ -87,24 +95,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Combines available stock and crypto instruments, rotates through them,
 /// fetches data for the current instrument, and prints the JSON output on one line.
 /// If neither are defined, the program exits with an error.
-fn output_current_instrument(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+/// The filter_mode parameter can restrict to only "stock" or "crypto" instruments.
+fn output_current_instrument(config: &Config, filter_mode: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let mut instruments: Vec<(&str, &str, &str)> = Vec::new();
 
     // Add stock instruments if defined and if tickers are provided.
-    if let Some(stock) = &config.stock {
-        if !stock.tickers.is_empty() {
-            for ticker in &stock.tickers {
-                instruments.push(("stock", ticker, ""));
+    if filter_mode.is_none() || filter_mode == Some("stock") {
+        if let Some(stock) = &config.stock {
+            if !stock.tickers.is_empty() {
+                for ticker in &stock.tickers {
+                    instruments.push(("stock", ticker, ""));
+                }
             }
         }
     }
 
     // Add crypto instruments if defined and if trade pairs are provided.
-    if let Some(crypto) = &config.crypto {
-        if !crypto.trade_pairs.is_empty() {
-            for (i, pair) in crypto.trade_pairs.iter().enumerate() {
-                let sign = crypto.trade_signs.get(i).map(|s| s.as_str()).unwrap_or("");
-                instruments.push(("crypto", pair, sign));
+    if filter_mode.is_none() || filter_mode == Some("crypto") {
+        if let Some(crypto) = &config.crypto {
+            if !crypto.trade_pairs.is_empty() {
+                for (i, pair) in crypto.trade_pairs.iter().enumerate() {
+                    let sign = crypto.trade_signs.get(i).map(|s| s.as_str()).unwrap_or("");
+                    instruments.push(("crypto", pair, sign));
+                }
             }
         }
     }
