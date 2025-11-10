@@ -633,13 +633,14 @@ struct FormatInfo {
 /// Collects character format information from the markup string.
 fn collect_char_formats(s: &str) -> std::collections::HashMap<usize, FormatInfo> {
     use std::collections::HashMap;
-    
+
     let mut result: HashMap<usize, FormatInfo> = HashMap::new();
     let mut position = 0;
+    let mut color_stack: Vec<String> = Vec::new();
     let mut current_color: Option<String> = None;
     let mut in_tag = false;
     let mut current_tag = String::new();
-    
+
     for ch in s.chars() {
         if ch == '<' {
             in_tag = true;
@@ -648,42 +649,69 @@ fn collect_char_formats(s: &str) -> std::collections::HashMap<usize, FormatInfo>
         } else if ch == '>' {
             current_tag.push(ch);
             in_tag = false;
-            
-            // Parse the tag
-            if current_tag.starts_with("<span color=") {
-                // Extract color value
-                if let Some(start) = current_tag.find('\'') {
-                    if let Some(end) = current_tag[start + 1..].find('\'') {
-                        let color = current_tag[start + 1..start + 1 + end].to_string();
+
+            let tag_lower = current_tag.to_ascii_lowercase();
+            if tag_lower.starts_with("<span") {
+                match extract_color_value_from_tag(&current_tag) {
+                    Some(color) => {
+                        color_stack.push(color.clone());
                         current_color = Some(color);
                     }
+                    None => eprintln!("Malformed <span> tag encountered: {}", current_tag),
                 }
-            } else if current_tag == "</span>" || current_tag == "</b>" {
-                // Closing tag - clear format if it's the outer span
-                if current_tag == "</span>" {
-                    current_color = None;
+            } else if tag_lower == "</span>" {
+                if color_stack.pop().is_none() {
+                    eprintln!("Unmatched </span> tag encountered in ticker text: {}", s);
                 }
+                current_color = color_stack.last().cloned();
+            } else if tag_lower == "</b>" {
+                // Ignored – bold tags do not affect color tracking.
             }
         } else if in_tag {
             current_tag.push(ch);
         } else {
-            // Regular character - save with current format
-            result.insert(position, FormatInfo {
-                character: ch,
-                color: current_color.clone(),
-            });
+            result.insert(
+                position,
+                FormatInfo {
+                    character: ch,
+                    color: current_color.clone(),
+                },
+            );
             position += 1;
         }
     }
-    
+
     result
+}
+
+fn extract_color_value_from_tag(tag: &str) -> Option<String> {
+    const COLOR_ATTR: &str = "color=";
+
+    let attr_pos = tag.find(COLOR_ATTR)?;
+    let mut rest = &tag[attr_pos + COLOR_ATTR.len()..];
+    rest = rest.trim_start();
+
+    let mut chars = rest.chars();
+    let quote = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        eprintln!("Color attribute missing quotes in tag: {}", tag);
+        return None;
+    }
+
+    let remainder = chars.as_str();
+    if let Some(end_idx) = remainder.find(quote) {
+        Some(remainder[..end_idx].to_string())
+    } else {
+        eprintln!("Color attribute missing closing quote in tag: {}", tag);
+        None
+    }
 }
 
 /// Strips markup tags from a string to get plain text length.
 fn strip_markup(s: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;
-    
+
     for ch in s.chars() {
         if ch == '<' {
             in_tag = true;
