@@ -1,17 +1,29 @@
 # Stock & Crypto Status Widget
 
-This Rust program fetches market data from two sources and outputs a one‑line JSON object suitable for status bars or widgets:
+This Rust program fetches market data from two sources and outputs formatted data suitable for status bars or widgets:
 
 - **Stocks (Tiingo API):**  
-  The default mode rotates through a list of stock tickers, caches API responses (with different cache durations for weekdays and weekends), calculates percentage changes based on current and previous close prices, and classifies the result using globally defined thresholds.
+  Fetches stock data, caches API responses (with different cache durations for weekdays and weekends), calculates percentage changes based on current and previous close prices, and classifies the result using globally defined thresholds.
 
 - **Cryptocurrencies (Kraken API):**  
-  When run with the `--crypto` flag, the program rotates through a list of crypto trade pairs, fetches OHLC and ticker data from Kraken, calculates percentage changes using yesterday’s candle data, and reuses the global thresholds for classification.
+  Fetches crypto data from Kraken, retrieves OHLC and ticker data, calculates percentage changes using yesterday's candle data, and reuses the global thresholds for classification.
 
-The output is a single-line JSON object with the following keys:
+## Operating Modes
+
+The program supports three operating modes:
+
+1. **Single Output Mode (Default):** Outputs a one-line JSON object for the current instrument based on rotation timing.
+2. **Continuous Mode (`--continuous`):** Continuously rotates through instruments, outputting JSON for each at regular intervals.
+3. **Ticker Mode (`--ticker`):** Displays a scrolling ticker window with all instruments, formatted with Pango markup for status bars.
+
+### Output Format
+
+**Single/Continuous Mode:** JSON object with the following keys:
 - **text:** A summary (ticker or symbol, price, and percentage change).
 - **tooltip:** Additional details (such as cache age for stocks or current crypto info).
 - **class:** A classification label (`critdown`, `down`, `up`, or `wayup`) based on configurable thresholds.
+
+**Ticker Mode:** Pango markup string showing a scrolling window of all instruments with color-coded formatting.
 
 ## Requirements
 
@@ -64,11 +76,24 @@ critdown = -10.0
 down = 0.0
 wayup = 5.0
 
+# Optional: Custom colors for ticker mode (hex color codes)
+# up_color = "#00FF00"
+# wayup_color = "#008000"
+# down_color = "#FF0000"
+# waydown_color = "#800000"
+
 # --- Crypto (via Kraken) Settings ---
 [crypto]
 trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
-trade_signs = ["", "", "⟠"]
+trade_signs = ["DOT", "₿", "⟠"]  # Symbols shown before price. Use "" for pair name fallback
 chart_interval = 5            # Candle interval in minutes
+cache_max_age = 120           # Maximum cache age for crypto data
+
+# --- Ticker Mode Settings (optional, required for --ticker mode) ---
+[ticker]
+window_size = 50              # Number of visible characters in the scrolling window
+separator = " - "             # Separator between instruments
+refresh_seconds = 1           # How often to refresh the ticker display
 ```
 
 ### Configuration Fields Explained
@@ -101,9 +126,22 @@ chart_interval = 5            # Candle interval in minutes
 - **[crypto]:**  
   Settings for fetching cryptocurrency data from Kraken:
   - **trade_pairs:** A list of crypto trade pairs to monitor.
-  - **trade_signs:** A list of corresponding symbols for display.
-  - **rotation_seconds (Crypto):** The interval (in seconds) for rotating through crypto pairs.
+  - **trade_signs:** A list of corresponding symbols for display. Use empty string `""` to display the pair name instead.
   - **chart_interval:** The candle interval (in minutes) for Kraken OHLC data.
+  - **cache_max_age:** Maximum cache age (in seconds) for crypto data.
+
+- **[thresholds] - Color Customization (Optional):**  
+  Custom hex color codes for ticker mode display:
+  - **up_color:** Color for positive changes below `wayup` threshold (default: `#00FF00`).
+  - **wayup_color:** Color for changes above `wayup` threshold (default: `#008000`).
+  - **down_color:** Color for negative changes above `critdown` threshold (default: `#FF0000`).
+  - **waydown_color:** Color for changes below `critdown` threshold (default: `#800000`).
+
+- **[ticker] (Optional, required for `--ticker` mode):**  
+  Settings for ticker mode display:
+  - **window_size:** Number of visible characters in the scrolling window.
+  - **separator:** Text separator between instruments (e.g., `" - "`).
+  - **refresh_seconds:** How often to refresh the ticker display.
 
 ## Running the Program
 
@@ -133,31 +171,87 @@ chart_interval = 5            # Candle interval in minutes
    echo 'export TIINGO_API_KEY="your_actual_api_key_here"' >> ~/.bashrc
    ```
 
-### Stock (Tiingo) Mode (Default)
+### Command-Line Usage
 
-To run the program in stock mode (which is the default), simply execute:
+The program supports several command-line flags to control its behavior:
+
+#### Single Output Mode (Default)
+
+Outputs one JSON object for the current instrument based on rotation timing:
 
 ```bash
 cargo run --release
 ```
 
-If your configuration file is located elsewhere or has a different name, specify its path as the first argument:
+#### Continuous Mode
+
+Continuously rotates through instruments, outputting JSON at regular intervals:
 
 ```bash
-cargo run --release path/to/your/config.toml -- --crypto
+cargo run --release -- --continuous
+```
+
+#### Ticker Mode
+
+Displays a scrolling ticker window with all instruments:
+
+```bash
+cargo run --release -- --ticker
+```
+
+#### Filter Modes
+
+Restrict output to only stocks or only crypto (works with all modes):
+
+```bash
+# Show only stocks
+cargo run --release -- --stock
+
+# Show only crypto
+cargo run --release -- --crypto
+
+# Combine with ticker mode
+cargo run --release -- --ticker --crypto
+```
+
+#### Custom Configuration File
+
+Specify a different configuration file path:
+
+```bash
+cargo run --release path/to/your/config.toml
+cargo run --release path/to/your/config.toml -- --continuous
 ```
 
 ## Output
 
+### Single/Continuous Mode Output
+
 The program outputs a single-line JSON object. For example:
 
+**Stock:**
 ```json
 {"text":"NVDA $123.45 (2.34%)","tooltip":"Cache Age: 45 seconds (Max allowed: 60 seconds)","class":"up"}
 ```
 
+**Crypto:**
+```json
+{"text":"₿ €45678.90 (1.23%)","tooltip":"€45678.90 (1.23%)","class":"up"}
+```
+
 - **text:** Displays the ticker (or crypto symbol), its price, and the percentage change.
-- **tooltip:** Provides additional details (such as cache age for stocks).
+- **tooltip:** Provides additional details (such as cache age for stocks or current price for crypto).
 - **class:** The classification (`critdown`, `down`, `up`, or `wayup`) based on the percentage change and global thresholds.
+
+### Ticker Mode Output
+
+Ticker mode outputs a Pango markup string with color-coded formatting. For example:
+
+```
+<span color='#00FF00'><b>NVDA $123.45 (2.34%)</b></span> - <span color='#008000'><b>₿ €45678.90 (5.67%)</b></span>
+```
+
+The output is a scrolling window that advances one character per invocation, creating a smooth ticker effect when called repeatedly. Position state is preserved in `.ticker_position` and `.ticker_content_hash` files.
 
 ## Dependencies
 
@@ -168,6 +262,7 @@ This project uses the following Rust crates:
 - [toml](https://crates.io/crates/toml) for parsing the configuration file.
 - [chrono](https://crates.io/crates/chrono) for date and time handling.
 - [dotenvy](https://crates.io/crates/dotenvy) for loading environment variables from `.env.local`.
+- [sha2](https://crates.io/crates/sha2) for hashing ticker content to detect changes.
 
 ## License
 
