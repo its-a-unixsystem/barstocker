@@ -16,6 +16,14 @@ struct Thresholds {
     critdown: f64, // if percentage change < critdown then "critdown"
     down: f64,     // if percentage change < down (but >= critdown) then "down"
     wayup: f64,    // if percentage change > wayup then "wayup"
+    #[serde(default)]
+    up_color: Option<String>,
+    #[serde(default)]
+    wayup_color: Option<String>,
+    #[serde(default)]
+    down_color: Option<String>,
+    #[serde(default)]
+    waydown_color: Option<String>,
 }
 
 /// Stock (Tiingo) configuration (optional).
