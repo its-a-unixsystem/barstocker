@@ -17,9 +17,15 @@ wayup_color = "#008000"   # Color for "wayup"
 down_color = "#FF0000"    # Color for "down"
 waydown_color = "#800000" # Color for "waydown"
 
-# --- Kraken (Crypto) Settings ---
+# --- Crypto (Kraken) Settings ---
 [crypto]
 trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
-trade_signs = ["", "", "⟠"]
+trade_signs = ["DOT", "BTC", "ETH"]
 chart_interval = 5            # Candle interval in minutes
 cache_max_age = 120
+
+# --- Ticker Mode Settings ---
+[ticker]
+window_size = 30              # Number of visible characters in the ticker
+separator = " - "             # Separator between items
+refresh_seconds = 60          # How often to refresh the data (in seconds)

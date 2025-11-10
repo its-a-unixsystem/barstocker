@@ -42,6 +42,16 @@ struct Config {
     stock: Option<StockConfig>,
     thresholds: Thresholds,
     crypto: Option<CryptoConfig>,
+    ticker: Option<TickerConfig>,
+}
+
+/// Ticker mode configuration.
+#[derive(Debug, Deserialize)]
+struct TickerConfig {
+    window_size: usize,        // Number of visible characters
+    separator: String,         // Separator between items (e.g., " - ")
+    #[allow(dead_code)]
+    refresh_seconds: u64,      // How often to refresh data
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
