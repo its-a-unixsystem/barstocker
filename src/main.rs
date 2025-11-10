@@ -57,17 +57,17 @@ struct Config {
 /// Ticker mode configuration.
 #[derive(Debug, Deserialize)]
 struct TickerConfig {
-    window_size: usize,        // Number of visible characters
-    separator: String,         // Separator between items (e.g., " - ")
+    window_size: usize, // Number of visible characters
+    separator: String,  // Separator between items (e.g., " - ")
     #[allow(dead_code)]
-    refresh_seconds: u64,      // How often to refresh data
+    refresh_seconds: u64, // How often to refresh data
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env.local (if it exists)
     // This allows loading API keys without hardcoding them
     let _ = dotenvy::from_filename(".env.local");
-    
+
     // Parse command-line arguments.
     // If an argument (not starting with "--") is provided, it's the config file.
     // The "--continuous" flag makes the application loop indefinitely.
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut continuous = false;
     let mut ticker_mode = false;
     let mut filter_mode: Option<&str> = None;
-    
+
     for arg in args.iter().skip(1) {
         if arg == "--continuous" {
             continuous = true;
@@ -415,28 +415,33 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
 }
 
 /// Runs ticker mode: displays a scrolling window of all instruments.
-fn run_ticker_mode(config: &Config, filter_mode: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let ticker_config = config.ticker.as_ref()
+fn run_ticker_mode(
+    config: &Config,
+    filter_mode: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ticker_config = config
+        .ticker
+        .as_ref()
         .ok_or("Ticker configuration missing. Add [ticker] section to config.toml")?;
-    
+
     let position_file = ".ticker_position";
     let content_hash_file = ".ticker_content_hash";
-    
+
     // Build ticker string
     let ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator)?;
     let ticker_length = get_plain_text_length(&ticker_string);
-    
+
     if ticker_length == 0 {
         return Err("Ticker string is empty".into());
     }
-    
+
     // Calculate hash of ticker content to detect changes
-    let content_hash = format!("{:x}", ticker_string.len());
-    
+    let content_hash = format!("{:x}", Sha256::digest(ticker_string.as_bytes()));
+
     // Load previous position
     let mut position: usize = 0;
     let previous_hash = fs::read_to_string(content_hash_file).unwrap_or_default();
-    
+
     // Only restore position if content hasn't changed
     if previous_hash.trim() == content_hash.trim() {
         if let Ok(pos_str) = fs::read_to_string(position_file) {
@@ -447,25 +452,33 @@ fn run_ticker_mode(config: &Config, filter_mode: Option<&str>) -> Result<(), Box
             }
         }
     }
-    
+
     // Output current window (raw markup for wrapper script to wrap in JSON)
     let window = get_ticker_window(&ticker_string, position, ticker_config.window_size);
     println!("{}", window);
-    
+
     // Advance position and wrap around
     position = (position + 1) % ticker_length;
-    
+
     // Save position and content hash
-    let _ = fs::write(position_file, position.to_string());
-    let _ = fs::write(content_hash_file, &content_hash);
-    
+    if let Err(e) = fs::write(position_file, position.to_string()) {
+        eprintln!("Failed to write {}: {}", position_file, e);
+    }
+    if let Err(e) = fs::write(content_hash_file, &content_hash) {
+        eprintln!("Failed to write {}: {}", content_hash_file, e);
+    }
+
     Ok(())
 }
 
 /// Builds the complete ticker string with all instruments and formatting.
-fn build_ticker_string(config: &Config, filter_mode: Option<&str>, separator: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn build_ticker_string(
+    config: &Config,
+    filter_mode: Option<&str>,
+    separator: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut items = Vec::new();
-    
+
     // Collect stock data
     if filter_mode.is_none() || filter_mode == Some("stock") {
         if let Some(stock) = &config.stock {
@@ -475,14 +488,18 @@ fn build_ticker_string(config: &Config, filter_mode: Option<&str>, separator: &s
                         let text = data["text"].as_str().unwrap_or("");
                         let class = data["class"].as_str().unwrap_or("up");
                         let color = get_color_for_class(class, config);
-                        items.push(format!("<span color='{}'><b>{}</b></span>", color, text));
+                        let escaped_text = escape_markup(text);
+                        items.push(format!(
+                            "<span color='{}'><b>{}</b></span>",
+                            color, escaped_text
+                        ));
                     }
                     Err(e) => eprintln!("Error fetching {}: {}", ticker, e),
                 }
             }
         }
     }
-    
+
     // Collect crypto data
     if filter_mode.is_none() || filter_mode == Some("crypto") {
         if let Some(crypto) = &config.crypto {
@@ -493,29 +510,65 @@ fn build_ticker_string(config: &Config, filter_mode: Option<&str>, separator: &s
                         let text = data["text"].as_str().unwrap_or("");
                         let class = data["class"].as_str().unwrap_or("up");
                         let color = get_color_for_class(class, config);
-                        items.push(format!("<span color='{}'><b>{}</b></span>", color, text));
+                        let escaped_text = escape_markup(text);
+                        items.push(format!(
+                            "<span color='{}'><b>{}</b></span>",
+                            color, escaped_text
+                        ));
                     }
                     Err(e) => eprintln!("Error fetching {}: {}", pair, e),
                 }
             }
         }
     }
-    
+
     if items.is_empty() {
         return Err("No data available for ticker".into());
     }
-    
+
     Ok(items.join(separator))
 }
 
 /// Gets the color for a given class from config.
 fn get_color_for_class(class: &str, config: &Config) -> String {
     match class {
-        "critdown" => config.thresholds.waydown_color.clone().unwrap_or_else(|| "#800000".to_string()),
-        "down" => config.thresholds.down_color.clone().unwrap_or_else(|| "#FF0000".to_string()),
-        "wayup" => config.thresholds.wayup_color.clone().unwrap_or_else(|| "#008000".to_string()),
-        _ => config.thresholds.up_color.clone().unwrap_or_else(|| "#00FF00".to_string()),
+        "critdown" => config
+            .thresholds
+            .waydown_color
+            .clone()
+            .unwrap_or_else(|| "#800000".to_string()),
+        "down" => config
+            .thresholds
+            .down_color
+            .clone()
+            .unwrap_or_else(|| "#FF0000".to_string()),
+        "wayup" => config
+            .thresholds
+            .wayup_color
+            .clone()
+            .unwrap_or_else(|| "#008000".to_string()),
+        _ => config
+            .thresholds
+            .up_color
+            .clone()
+            .unwrap_or_else(|| "#00FF00".to_string()),
     }
+}
+
+/// Escapes markup-sensitive characters so ticker text cannot inject markup.
+fn escape_markup(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&apos;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Extracts a window from the ticker string, handling wrapping and preserving complete markup.
@@ -523,20 +576,20 @@ fn get_ticker_window(full_string: &str, position: usize, window_size: usize) -> 
     let plain_text = strip_markup(full_string);
     let plain_chars: Vec<char> = plain_text.chars().collect();
     let plain_len = plain_chars.len();
-    
+
     if plain_len == 0 {
         return String::new();
     }
-    
+
     // Build a mapping of plain text positions to their formatting
     let char_formats = collect_char_formats(full_string);
-    
+
     let mut result = String::new();
     let mut last_color: Option<String> = None;
-    
+
     for i in 0..window_size {
         let pos = (position + i) % plain_len;
-        
+
         if let Some(format_info) = char_formats.get(&pos) {
             // Check if color changed
             if last_color != format_info.color {
@@ -551,7 +604,7 @@ fn get_ticker_window(full_string: &str, position: usize, window_size: usize) -> 
                 }
                 last_color = format_info.color.clone();
             }
-            
+
             result.push(format_info.character);
         } else if let Some(ch) = plain_chars.get(pos) {
             // No format for this character, close any open tags
@@ -562,12 +615,12 @@ fn get_ticker_window(full_string: &str, position: usize, window_size: usize) -> 
             result.push(*ch);
         }
     }
-    
+
     // Close any remaining open tags
     if last_color.is_some() {
         result.push_str("</b></span>");
     }
-    
+
     result
 }
 
@@ -640,7 +693,7 @@ fn strip_markup(s: &str) -> String {
             result.push(ch);
         }
     }
-    
+
     result
 }
 
