@@ -1,0 +1,29 @@
+rotation_seconds = 70
+
+# API Key Configuration:
+# Set your Tiingo API key in .env.local (recommended) or as an environment variable
+# See .env.example for the format
+
+[stock]
+tickers = ["NVDA", "BRK-A", "SPY"]
+# Cache settings (in seconds)
+cache_max_age = 60           # Maximum cache age on weekdays
+weekend_cache_max_age = 120  # Maximum cache age on Saturdays and Sundays
+
+[thresholds]
+# Global thresholds for classifying percentage change for both stocks and crypto:
+# - If the percentage change is less than `down`, then:
+#     * If it is also less than `critdown`, it is classified as "critdown"
+#     * Otherwise, as "down"
+# - If the percentage change is greater than `wayup`, it is classified as "wayup"
+# - Otherwise, it is classified as "up"
+critdown = -10.0
+down = 0.0
+wayup = 5.0
+
+# --- Crypto (Kraken) Settings ---
+[crypto]
+trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
+trade_signs = ["DOT", "₿", "⟠"]  # Symbols shown before price. Use "" for pair name fallback
+chart_interval = 5            # Candle interval in minutes
+cache_max_age = 120
