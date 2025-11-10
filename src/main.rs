@@ -70,16 +70,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments.
     // If an argument (not starting with "--") is provided, it's the config file.
     // The "--continuous" flag makes the application loop indefinitely.
-    // The "--crypto" flag shows only crypto instruments.
-    // The "--stock" flag shows only stock instruments.
+    // The "--ticker" flag enables scrolling ticker mode.
+    // The "--crypto" flag shows only crypto instruments (ticker mode only).
+    // The "--stock" flag shows only stock instruments (ticker mode only).
     let args: Vec<String> = env::args().collect();
     let mut config_file = "config.toml".to_string();
     let mut continuous = false;
+    let mut ticker_mode = false;
     let mut filter_mode: Option<&str> = None;
     
     for arg in args.iter().skip(1) {
         if arg == "--continuous" {
             continuous = true;
+        } else if arg == "--ticker" {
+            ticker_mode = true;
         } else if arg == "--crypto" {
             filter_mode = Some("crypto");
         } else if arg == "--stock" {
@@ -99,7 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         err
     })?;
 
-    if continuous {
+    if ticker_mode {
+        run_ticker_mode(&config, filter_mode)?;
+    } else if continuous {
         loop {
             output_current_instrument(&config, filter_mode)?;
             thread::sleep(Duration::from_secs(config.rotation_seconds));
@@ -392,9 +398,252 @@ fn run_crypto_for_pair(pair: &str, sign: &str, config: &Config) -> Result<Value,
     };
     
     let current_value_str = format!("{:.2}", current_value);
+    
+    // Format text: use sign if provided, otherwise use pair name
+    let display_name = if sign.is_empty() {
+        pair.to_string()
+    } else {
+        sign.to_string()
+    };
+    
     Ok(json!({
-        "text": format!("{} €{} ({}%)", sign, current_value_str, change_percentage_str),
+        "text": format!("{} €{} ({}%)", display_name, current_value_str, change_percentage_str),
         "tooltip": format!("€{} ({}%)", current_value_str, change_percentage_str),
         "class": status_class,
     }))
+}
+
+/// Runs ticker mode: displays a scrolling window of all instruments.
+fn run_ticker_mode(config: &Config, filter_mode: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let ticker_config = config.ticker.as_ref()
+        .ok_or("Ticker configuration missing. Add [ticker] section to config.toml")?;
+    
+    let position_file = ".ticker_position";
+    let content_hash_file = ".ticker_content_hash";
+    
+    // Build ticker string
+    let ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator)?;
+    let ticker_length = get_plain_text_length(&ticker_string);
+    
+    if ticker_length == 0 {
+        return Err("Ticker string is empty".into());
+    }
+    
+    // Calculate hash of ticker content to detect changes
+    let content_hash = format!("{:x}", ticker_string.len());
+    
+    // Load previous position
+    let mut position: usize = 0;
+    let previous_hash = fs::read_to_string(content_hash_file).unwrap_or_default();
+    
+    // Only restore position if content hasn't changed
+    if previous_hash.trim() == content_hash.trim() {
+        if let Ok(pos_str) = fs::read_to_string(position_file) {
+            position = pos_str.trim().parse().unwrap_or(0);
+            // Ensure position is valid for current content
+            if position >= ticker_length {
+                position = 0;
+            }
+        }
+    }
+    
+    // Output current window (raw markup for wrapper script to wrap in JSON)
+    let window = get_ticker_window(&ticker_string, position, ticker_config.window_size);
+    println!("{}", window);
+    
+    // Advance position and wrap around
+    position = (position + 1) % ticker_length;
+    
+    // Save position and content hash
+    let _ = fs::write(position_file, position.to_string());
+    let _ = fs::write(content_hash_file, &content_hash);
+    
+    Ok(())
+}
+
+/// Builds the complete ticker string with all instruments and formatting.
+fn build_ticker_string(config: &Config, filter_mode: Option<&str>, separator: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut items = Vec::new();
+    
+    // Collect stock data
+    if filter_mode.is_none() || filter_mode == Some("stock") {
+        if let Some(stock) = &config.stock {
+            for ticker in &stock.tickers {
+                match run_tiingo_for_ticker(ticker, config) {
+                    Ok(data) => {
+                        let text = data["text"].as_str().unwrap_or("");
+                        let class = data["class"].as_str().unwrap_or("up");
+                        let color = get_color_for_class(class, config);
+                        items.push(format!("<span color='{}'><b>{}</b></span>", color, text));
+                    }
+                    Err(e) => eprintln!("Error fetching {}: {}", ticker, e),
+                }
+            }
+        }
+    }
+    
+    // Collect crypto data
+    if filter_mode.is_none() || filter_mode == Some("crypto") {
+        if let Some(crypto) = &config.crypto {
+            for (i, pair) in crypto.trade_pairs.iter().enumerate() {
+                let sign = crypto.trade_signs.get(i).map(|s| s.as_str()).unwrap_or("");
+                match run_crypto_for_pair(pair, sign, config) {
+                    Ok(data) => {
+                        let text = data["text"].as_str().unwrap_or("");
+                        let class = data["class"].as_str().unwrap_or("up");
+                        let color = get_color_for_class(class, config);
+                        items.push(format!("<span color='{}'><b>{}</b></span>", color, text));
+                    }
+                    Err(e) => eprintln!("Error fetching {}: {}", pair, e),
+                }
+            }
+        }
+    }
+    
+    if items.is_empty() {
+        return Err("No data available for ticker".into());
+    }
+    
+    Ok(items.join(separator))
+}
+
+/// Gets the color for a given class from config.
+fn get_color_for_class(class: &str, config: &Config) -> String {
+    match class {
+        "critdown" => config.thresholds.waydown_color.clone().unwrap_or_else(|| "#800000".to_string()),
+        "down" => config.thresholds.down_color.clone().unwrap_or_else(|| "#FF0000".to_string()),
+        "wayup" => config.thresholds.wayup_color.clone().unwrap_or_else(|| "#008000".to_string()),
+        _ => config.thresholds.up_color.clone().unwrap_or_else(|| "#00FF00".to_string()),
+    }
+}
+
+/// Extracts a window from the ticker string, handling wrapping and preserving complete markup.
+fn get_ticker_window(full_string: &str, position: usize, window_size: usize) -> String {
+    let plain_text = strip_markup(full_string);
+    let plain_chars: Vec<char> = plain_text.chars().collect();
+    let plain_len = plain_chars.len();
+    
+    if plain_len == 0 {
+        return String::new();
+    }
+    
+    // Build a mapping of plain text positions to their formatting
+    let char_formats = collect_char_formats(full_string);
+    
+    let mut result = String::new();
+    let mut last_color: Option<String> = None;
+    
+    for i in 0..window_size {
+        let pos = (position + i) % plain_len;
+        
+        if let Some(format_info) = char_formats.get(&pos) {
+            // Check if color changed
+            if last_color != format_info.color {
+                // Close previous format if any
+                if last_color.is_some() {
+                    result.push_str("</b></span>");
+                }
+                // Open new format
+                if let Some(color) = &format_info.color {
+                    result.push_str(&format!("<span color='{}'>", color));
+                    result.push_str("<b>");
+                }
+                last_color = format_info.color.clone();
+            }
+            
+            result.push(format_info.character);
+        } else if let Some(ch) = plain_chars.get(pos) {
+            // No format for this character, close any open tags
+            if last_color.is_some() {
+                result.push_str("</b></span>");
+                last_color = None;
+            }
+            result.push(*ch);
+        }
+    }
+    
+    // Close any remaining open tags
+    if last_color.is_some() {
+        result.push_str("</b></span>");
+    }
+    
+    result
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct FormatInfo {
+    character: char,
+    color: Option<String>,
+}
+
+/// Collects character format information from the markup string.
+fn collect_char_formats(s: &str) -> std::collections::HashMap<usize, FormatInfo> {
+    use std::collections::HashMap;
+    
+    let mut result: HashMap<usize, FormatInfo> = HashMap::new();
+    let mut position = 0;
+    let mut current_color: Option<String> = None;
+    let mut in_tag = false;
+    let mut current_tag = String::new();
+    
+    for ch in s.chars() {
+        if ch == '<' {
+            in_tag = true;
+            current_tag.clear();
+            current_tag.push(ch);
+        } else if ch == '>' {
+            current_tag.push(ch);
+            in_tag = false;
+            
+            // Parse the tag
+            if current_tag.starts_with("<span color=") {
+                // Extract color value
+                if let Some(start) = current_tag.find('\'') {
+                    if let Some(end) = current_tag[start + 1..].find('\'') {
+                        let color = current_tag[start + 1..start + 1 + end].to_string();
+                        current_color = Some(color);
+                    }
+                }
+            } else if current_tag == "</span>" || current_tag == "</b>" {
+                // Closing tag - clear format if it's the outer span
+                if current_tag == "</span>" {
+                    current_color = None;
+                }
+            }
+        } else if in_tag {
+            current_tag.push(ch);
+        } else {
+            // Regular character - save with current format
+            result.insert(position, FormatInfo {
+                character: ch,
+                color: current_color.clone(),
+            });
+            position += 1;
+        }
+    }
+    
+    result
+}
+
+/// Strips markup tags from a string to get plain text length.
+fn strip_markup(s: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    
+    for ch in s.chars() {
+        if ch == '<' {
+            in_tag = true;
+        } else if ch == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(ch);
+        }
+    }
+    
+    result
+}
+
+/// Gets the plain text length (excluding markup).
+fn get_plain_text_length(s: &str) -> usize {
+    strip_markup(s).chars().count()
 }
