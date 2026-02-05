@@ -110,15 +110,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         err
     })?;
 
+    // Create a single HTTP client to reuse across all requests.
+    // This enables connection pooling and DNS caching, dramatically reducing DNS queries.
+    let client = Client::new();
+
     if ticker_mode {
-        run_ticker_mode(&config, filter_mode)?;
+        run_ticker_mode(&config, filter_mode, &client)?;
     } else if continuous {
         loop {
-            output_current_instrument(&config, filter_mode)?;
+            output_current_instrument(&config, filter_mode, &client)?;
             thread::sleep(Duration::from_secs(config.rotation_seconds));
         }
     } else {
-        output_current_instrument(&config, filter_mode)?;
+        output_current_instrument(&config, filter_mode, &client)?;
     }
     Ok(())
 }
@@ -130,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn output_current_instrument(
     config: &Config,
     filter_mode: Option<&str>,
+    client: &Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut instruments: Vec<(&str, &str, &str)> = Vec::new();
 
@@ -165,9 +170,9 @@ fn output_current_instrument(
     let (inst_type, symbol, sign) = instruments[index as usize];
 
     let output = if inst_type == "stock" {
-        run_tiingo_for_ticker(symbol, config)?
+        run_tiingo_for_ticker(symbol, config, client)?
     } else {
-        run_crypto_for_pair(symbol, sign, config)?
+        run_crypto_for_pair(symbol, sign, config, client)?
     };
 
     println!("{}", serde_json::to_string(&output)?);
@@ -210,6 +215,7 @@ fn atomic_write(file_path: &str, content: &str) -> Result<(), Box<dyn std::error
 fn run_tiingo_for_ticker(
     ticker: &str,
     config: &Config,
+    client: &Client,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let stock_config = config.stock.as_ref().ok_or("Stock configuration missing")?;
 
@@ -233,7 +239,6 @@ fn run_tiingo_for_ticker(
     let use_cache = is_cache_valid(&cache_file, effective_cache_max_age);
 
     let tiingo_url = format!("https://api.tiingo.com/iex/{}", ticker);
-    let client = Client::new();
     let response_text = if use_cache {
         fs::read_to_string(&cache_file)?
     } else {
@@ -327,6 +332,7 @@ fn run_crypto_for_pair(
     pair: &str,
     sign: &str,
     config: &Config,
+    client: &Client,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let crypto = config
         .crypto
@@ -350,7 +356,6 @@ fn run_crypto_for_pair(
         kraken_api, pair, crypto.chart_interval
     );
     let ticker_url = format!("{}/Ticker?pair={}", kraken_api, pair);
-    let client = Client::new();
 
     let ohlc_text = if use_cache_ohlc {
         fs::read_to_string(&cache_file_ohlc)?
@@ -475,6 +480,7 @@ fn run_crypto_for_pair(
 fn run_ticker_mode(
     config: &Config,
     filter_mode: Option<&str>,
+    client: &Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ticker_config = config
         .ticker
@@ -485,7 +491,7 @@ fn run_ticker_mode(
     let content_hash_file = ".ticker_content_hash";
 
     // Build ticker string
-    let ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator)?;
+    let ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator, client)?;
     let ticker_length = get_plain_text_length(&ticker_string);
 
     if ticker_length == 0 {
@@ -533,6 +539,7 @@ fn build_ticker_string(
     config: &Config,
     filter_mode: Option<&str>,
     separator: &str,
+    client: &Client,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut items = Vec::new();
 
@@ -540,7 +547,7 @@ fn build_ticker_string(
     if filter_mode.is_none() || filter_mode == Some("stock") {
         if let Some(stock) = &config.stock {
             for ticker in &stock.tickers {
-                match run_tiingo_for_ticker(ticker, config) {
+                match run_tiingo_for_ticker(ticker, config, client) {
                     Ok(data) => {
                         let text = data["text"].as_str().unwrap_or("");
                         let class = data["class"].as_str().unwrap_or("up");
@@ -562,7 +569,7 @@ fn build_ticker_string(
         if let Some(crypto) = &config.crypto {
             for (i, pair) in crypto.trade_pairs.iter().enumerate() {
                 let sign = crypto.trade_signs.get(i).map(|s| s.as_str()).unwrap_or("");
-                match run_crypto_for_pair(pair, sign, config) {
+                match run_crypto_for_pair(pair, sign, config, client) {
                     Ok(data) => {
                         let text = data["text"].as_str().unwrap_or("");
                         let class = data["class"].as_str().unwrap_or("up");
