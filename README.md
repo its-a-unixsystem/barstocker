@@ -14,7 +14,7 @@ The program supports three operating modes:
 
 1. **Single Output Mode (Default):** Outputs a one-line JSON object for the current instrument based on rotation timing.
 2. **Continuous Mode (`--continuous`):** Continuously rotates through instruments, outputting JSON for each at regular intervals.
-3. **Ticker Mode (`--ticker`):** Displays a scrolling ticker window with all instruments, formatted with Pango markup for status bars.
+3. **Ticker Mode (`--ticker`):** Runs as a long-lived process, displaying a scrolling ticker window with all instruments. Outputs one JSON line per second with Pango markup in the `text` field. Data is refreshed from APIs every `refresh_seconds`.
 
 ### Output Format
 
@@ -23,7 +23,7 @@ The program supports three operating modes:
 - **tooltip:** Additional details (such as cache age for stocks or current crypto info).
 - **class:** A classification label (`critdown`, `down`, `up`, or `wayup`) based on configurable thresholds.
 
-**Ticker Mode:** Pango markup string showing a scrolling window of all instruments with color-coded formatting.
+**Ticker Mode:** JSON lines (one per second) with a `text` field containing Pango markup showing a scrolling window of all instruments with color-coded formatting. Runs as a long-lived process.
 
 ## Requirements
 
@@ -93,7 +93,7 @@ cache_max_age = 120           # Maximum cache age for crypto data
 [ticker]
 window_size = 50              # Number of visible characters in the scrolling window
 separator = " - "             # Separator between instruments
-refresh_seconds = 1           # How often to refresh the ticker display
+refresh_seconds = 60          # How often to re-fetch data from APIs (in seconds)
 ```
 
 ### Configuration Fields Explained
@@ -137,11 +137,11 @@ refresh_seconds = 1           # How often to refresh the ticker display
   - **down_color:** Color for negative changes above `critdown` threshold (default: `#FF0000`).
   - **waydown_color:** Color for changes below `critdown` threshold (default: `#800000`).
 
-- **[ticker] (Optional, required for `--ticker` mode):**  
+- **[ticker] (Optional, required for `--ticker` mode):**
   Settings for ticker mode display:
   - **window_size:** Number of visible characters in the scrolling window.
   - **separator:** Text separator between instruments (e.g., `" - "`).
-  - **refresh_seconds:** How often to refresh the ticker display.
+  - **refresh_seconds:** How often (in seconds) to re-fetch data from APIs. The ticker scrolls every second regardless of this value.
 
 ## Running the Program
 
@@ -193,7 +193,7 @@ cargo run --release -- --continuous
 
 #### Ticker Mode
 
-Displays a scrolling ticker window with all instruments:
+Runs a long-lived process that scrolls a ticker window of all instruments, outputting one JSON line per second:
 
 ```bash
 cargo run --release -- --ticker
@@ -245,13 +245,26 @@ The program outputs a single-line JSON object. For example:
 
 ### Ticker Mode Output
 
-Ticker mode outputs a Pango markup string with color-coded formatting. For example:
+Ticker mode runs as a long-lived process, outputting one JSON line per second. Each line contains Pango markup in the `text` field:
 
-```
-<span color='#00FF00'><b>NVDA $123.45 (2.34%)</b></span> - <span color='#008000'><b>₿ €45678.90 (5.67%)</b></span>
+```json
+{"text":"<span color='#00FF00'><b>NVDA $123.45 (2.34%)</b></span> - <span color='#008000'><b>₿ €45678.90 (5.67%)</b></span>","tooltip":"Stock Ticker","class":"ticker"}
 ```
 
-The output is a scrolling window that advances one character per invocation, creating a smooth ticker effect when called repeatedly. Position state is preserved in `.ticker_position` and `.ticker_content_hash` files.
+The scrolling window advances one character per second. Data is re-fetched from APIs every `refresh_seconds` (configured in `[ticker]`).
+
+#### Waybar Integration
+
+In waybar, use `restart-interval` instead of `interval` so the process runs continuously:
+
+```json
+"custom/stock": {
+    "exec": "stocker --ticker",
+    "restart-interval": 60,
+    "return-type": "json",
+    "on-click": ""
+}
+```
 
 ## Dependencies
 
@@ -262,7 +275,6 @@ This project uses the following Rust crates:
 - [toml](https://crates.io/crates/toml) for parsing the configuration file.
 - [chrono](https://crates.io/crates/chrono) for date and time handling.
 - [dotenvy](https://crates.io/crates/dotenvy) for loading environment variables from `.env.local`.
-- [sha2](https://crates.io/crates/sha2) for hashing ticker content to detect changes.
 
 ## License
 

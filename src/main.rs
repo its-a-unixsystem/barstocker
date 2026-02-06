@@ -3,11 +3,11 @@ use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -57,10 +57,9 @@ struct Config {
 /// Ticker mode configuration.
 #[derive(Debug, Deserialize)]
 struct TickerConfig {
-    window_size: usize, // Number of visible characters
-    separator: String,  // Separator between items (e.g., " - ")
-    #[allow(dead_code)]
-    refresh_seconds: u64, // How often to refresh data
+    window_size: usize,   // Number of visible characters
+    separator: String,     // Separator between items (e.g., " - ")
+    refresh_seconds: u64,  // How often to refresh data from APIs
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -476,7 +475,8 @@ fn run_crypto_for_pair(
     }))
 }
 
-/// Runs ticker mode: displays a scrolling window of all instruments.
+/// Runs ticker mode as a persistent loop: scrolls the ticker every second
+/// and re-fetches data every `refresh_seconds`.
 fn run_ticker_mode(
     config: &Config,
     filter_mode: Option<&str>,
@@ -487,51 +487,52 @@ fn run_ticker_mode(
         .as_ref()
         .ok_or("Ticker configuration missing. Add [ticker] section to config.toml")?;
 
-    let position_file = ".ticker_position";
-    let content_hash_file = ".ticker_content_hash";
-
-    // Build ticker string
-    let ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator, client)?;
-    let ticker_length = get_plain_text_length(&ticker_string);
+    let refresh_interval = Duration::from_secs(ticker_config.refresh_seconds);
+    let mut position: usize = 0;
+    let mut ticker_string = build_ticker_string(config, filter_mode, &ticker_config.separator, client)?;
+    let mut ticker_length = get_plain_text_length(&ticker_string);
+    let mut last_refresh = Instant::now();
 
     if ticker_length == 0 {
         return Err("Ticker string is empty".into());
     }
 
-    // Calculate hash of ticker content to detect changes
-    let content_hash = format!("{:x}", Sha256::digest(ticker_string.as_bytes()));
+    let stdout = std::io::stdout();
 
-    // Load previous position
-    let mut position: usize = 0;
-    let previous_hash = fs::read_to_string(content_hash_file).unwrap_or_default();
-
-    // Only restore position if content hasn't changed
-    if previous_hash.trim() == content_hash.trim() {
-        if let Ok(pos_str) = fs::read_to_string(position_file) {
-            position = pos_str.trim().parse().unwrap_or(0);
-            // Ensure position is valid for current content
-            if position >= ticker_length {
-                position = 0;
+    loop {
+        // Re-fetch data if refresh interval has elapsed
+        if last_refresh.elapsed() >= refresh_interval {
+            match build_ticker_string(config, filter_mode, &ticker_config.separator, client) {
+                Ok(new_string) => {
+                    let new_length = get_plain_text_length(&new_string);
+                    if new_length > 0 {
+                        ticker_string = new_string;
+                        ticker_length = new_length;
+                        if position >= ticker_length {
+                            position = 0;
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Error refreshing ticker data: {}", e),
             }
+            last_refresh = Instant::now();
         }
+
+        let window = get_ticker_window(&ticker_string, position, ticker_config.window_size);
+        let output = json!({
+            "text": window,
+            "tooltip": "Stock Ticker",
+            "class": "ticker",
+        });
+        {
+            let mut out = stdout.lock();
+            let _ = writeln!(out, "{}", output);
+            let _ = out.flush();
+        }
+
+        position = (position + 1) % ticker_length;
+        thread::sleep(Duration::from_secs(1));
     }
-
-    // Output current window (raw markup for wrapper script to wrap in JSON)
-    let window = get_ticker_window(&ticker_string, position, ticker_config.window_size);
-    println!("{}", window);
-
-    // Advance position and wrap around
-    position = (position + 1) % ticker_length;
-
-    // Save position and content hash
-    if let Err(e) = fs::write(position_file, position.to_string()) {
-        eprintln!("Failed to write {}: {}", position_file, e);
-    }
-    if let Err(e) = fs::write(content_hash_file, &content_hash) {
-        eprintln!("Failed to write {}: {}", content_hash_file, e);
-    }
-
-    Ok(())
 }
 
 /// Builds the complete ticker string with all instruments and formatting.

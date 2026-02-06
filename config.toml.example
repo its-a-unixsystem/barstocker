@@ -27,3 +27,9 @@ trade_pairs = ["DOTEUR", "TBTCEUR", "XETHZEUR"]
 trade_signs = ["DOT", "₿", "⟠"]  # Symbols shown before price. Use "" for pair name fallback
 chart_interval = 5            # Candle interval in minutes
 cache_max_age = 120
+
+# --- Ticker Mode Settings (required for --ticker mode) ---
+[ticker]
+window_size = 50              # Number of visible characters in the scrolling window
+separator = " - "             # Separator between instruments
+refresh_seconds = 60          # How often to re-fetch data from APIs (in seconds)
